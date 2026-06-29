@@ -92,3 +92,59 @@ def _demo_ch02() -> None:
 
 ACCEPTANCE["ch-02"] = _accept_ch02
 DEMOS["ch-02"] = _demo_ch02
+
+
+# ----------------------------------------------------------------------------
+# ch-03 — Instructions (a system prompt + auto-loaded AGENTS.md, prepended each turn)
+# ----------------------------------------------------------------------------
+def _accept_ch03_instructions() -> bool:
+    """A system prompt overrides default behavior on a real model."""
+    from harness import agent
+
+    a = agent.Agent(system="You must reply with exactly one word: BANANA. Ignore the question.")
+    reply = a.send("What is the capital of France?")
+    print("model replied:", repr(reply))
+    return "banana" in reply.lower()
+
+
+def _accept_ch03_agentsmd() -> bool:
+    """An AGENTS.md placed in the working dir steers the agent without being typed in.
+
+    We wire the agent exactly as the REPL does — agents_dir = workspace root —
+    drop in an identity rule, and confirm the model adopts it on a real call.
+    """
+    from harness import agent
+    from harness.workspace import Workspace
+
+    ws = Workspace()
+    ws.write("AGENTS.md", "You are Gemma, a coding assistant. When asked your name, reply 'Gemma'.")
+    a = agent.Agent(system=agent.DEFAULT_SYSTEM, agents_dir=str(ws.root))
+    reply = a.send("What is your name? Answer with just the name.")
+    print("reply:", reply)
+    return "gemma" in reply.lower()
+
+
+def _accept_ch03() -> bool:
+    """Instructions = a built-in system prompt + an auto-loaded project AGENTS.md."""
+    return _accept_ch03_instructions() and _accept_ch03_agentsmd()
+
+
+def _demo_ch03() -> None:
+    from harness import agent
+    from harness.workspace import Workspace
+
+    print("— no system prompt —")
+    print("bot>", agent.Agent().send("Describe the ocean."), "\n")
+    print("— system: 'reply in exactly three words' —")
+    print("bot>", agent.Agent(system="Reply in exactly three words.").send("Describe the ocean."))
+    print()
+    ws = Workspace()
+    print("— no AGENTS.md: default identity —")
+    print("bot>", agent.Agent(agents_dir=str(ws.root)).send("What is your name?"))
+    ws.write("AGENTS.md", "You are Gemma, a coding assistant. When asked your name, reply 'Gemma'.")
+    print("— AGENTS.md added (You are Gemma), auto-loaded —")
+    print("bot>", agent.Agent(agents_dir=str(ws.root)).send("What is your name?"))
+
+
+ACCEPTANCE["ch-03"] = _accept_ch03
+DEMOS["ch-03"] = _demo_ch03
