@@ -1,0 +1,27 @@
+#!/usr/bin/env sh
+# Commit gate. Enable once with:  git config core.hooksPath .githooks
+#
+# (A) deterministic gate — always (fast, no network)
+# (B) live acceptance — for the current chapter, if a check is registered
+#     (exit 2 from `accept` means "no check yet", e.g. a deck-only commit → skip)
+
+echo "[pre-commit] (A) deterministic gate: uv run verify"
+if ! uv run verify; then
+  echo "[pre-commit] verify failed — commit blocked"
+  exit 1
+fi
+
+CH=$(cat .current-chapter 2>/dev/null)
+if [ -n "$CH" ]; then
+  echo "[pre-commit] (B) live acceptance: uv run accept $CH"
+  uv run accept "$CH"
+  rc=$?
+  if [ "$rc" -eq 2 ]; then
+    echo "[pre-commit] no live check registered for $CH yet — skipping"
+  elif [ "$rc" -ne 0 ]; then
+    echo "[pre-commit] live acceptance failed for $CH — commit blocked"
+    exit 1
+  fi
+fi
+
+echo "[pre-commit] OK"

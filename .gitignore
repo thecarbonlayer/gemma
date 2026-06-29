@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+dist/
+build/
+*.egg-info/
+# durable state written by the agent in later chapters
+.sessions/
+.agent_state/
