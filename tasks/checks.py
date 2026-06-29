@@ -511,3 +511,89 @@ def _demo_ch08() -> None:
 
 ACCEPTANCE["ch-08"] = _accept_ch08
 DEMOS["ch-08"] = _demo_ch08
+
+
+# ----------------------------------------------------------------------------
+# ch-09 — Durable state + memory (persisted sessions + episodic search)
+# ----------------------------------------------------------------------------
+def _accept_ch09_state() -> bool:
+    """Tell the agent a fact, then a *fresh* agent (restart) recalls it from disk."""
+    import tempfile
+
+    from harness import agent
+
+    d = tempfile.mkdtemp()
+    first = agent.Agent(system="Be concise.", session="acc", sessions_dir=d)
+    first.send("Remember: The one with the mark is Teja.")
+
+    # Simulate a restart: brand-new agent, same session id, loaded from disk.
+    resumed = agent.Agent(system="Be concise.", session="acc", sessions_dir=d)
+    print("resumed messages:", len(resumed.messages))
+    reply = resumed.send("Who is the one with the mark? Reply with one word.")
+    print("reply:", repr(reply))
+    return len(resumed.messages) > 2 and "teja" in reply.lower()
+
+
+def _accept_ch09_episodic() -> bool:
+    """The model recalls a fact from a PAST session via the search_memory tool.
+
+    GOGO-77 lives only in a stored session, not in the current context, so
+    producing it proves cross-session text-search retrieval.
+    """
+    import tempfile
+
+    from harness import agent
+    from harness.memory import save_session, search_memory_tool
+    from harness.tools import default_tools
+
+    d = tempfile.mkdtemp()
+    save_session(
+        "old-session",
+        [
+            {"role": "user", "content": "Remember: the warehouse passcode is GOGO-77."},
+            {"role": "assistant", "content": "Got it."},
+        ],
+        base=d,
+    )
+    tools = default_tools()
+    tools.register(search_memory_tool(base=d))
+    a = agent.Agent(
+        system="Use the search_memory tool to recall facts from earlier sessions.",
+        tools=tools,
+    )
+    reply = a.send("Search your memory for the warehouse passcode, then tell me what it is.")
+    used = any(m.get("role") == "tool" for m in a.messages)
+    print("used search_memory:", used, "| reply:", repr(reply))
+    return "gogo-77" in reply.lower() and used
+
+
+def _accept_ch09() -> bool:
+    """Durable state + memory = persisted sessions + cross-session episodic search."""
+    return _accept_ch09_state() and _accept_ch09_episodic()
+
+
+def _demo_ch09() -> None:
+    import tempfile
+
+    from harness import agent
+    from harness.memory import save_session, search_memory_tool
+    from harness.tools import default_tools
+
+    d = tempfile.mkdtemp()
+    agent.Agent(session="demo", sessions_dir=d).send("Remember: the amount is 8535.29.")
+    print("— restart —")
+    print("bot>", agent.Agent(session="demo", sessions_dir=d).send("What amount did I mention?"))
+
+    save_session(
+        "archive",
+        [{"role": "user", "content": "Remember: Raveena is Karishma."}],
+        base=d,
+    )
+    tools = default_tools()
+    tools.register(search_memory_tool(base=d))
+    a = agent.Agent(system="Use search_memory to recall past facts.", tools=tools)
+    print("bot>", a.send("Search your memory: who is Raveena?"))
+
+
+ACCEPTANCE["ch-09"] = _accept_ch09
+DEMOS["ch-09"] = _demo_ch09

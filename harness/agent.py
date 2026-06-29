@@ -1,19 +1,20 @@
 """The agent — the harness drive loop. Grows one primitive per chapter.
 
-ch-08 — Execution environment. The model never runs code; the harness does,
-inside a boundary (``harness/sandbox.py``, now hardened: no network, non-root, a
-scrubbed environment with no inherited credentials). Two more boundary fixes land
-with it: ``read_file`` is confined to the workspace (no ``/etc/passwd``), and the
-verifier (``harness/verification.py``, exercised by tools, not yet by the loop)
-runs candidate code in a scrubbed process.
+ch-09 — Durable state. Conversation is not state. Until now every turn lived in
+memory and died with the process. Now, when the agent is given a session id, it
+loads its prior conversation from disk on startup (``load_session``) and writes
+the full history back after every turn (``_save`` → ``save_session``). Kill it,
+restart with the same id, and it resumes — the kill point is the only boundary,
+and nothing survives unless the harness wrote it down.
 
-The loop's only change is how compaction earns its token count. Until now it
-*estimated* the window from message length. Now that the boundary work has us
-reading the model's reported usage, ``_run`` captures ``resp.usage`` into
-``self._last_tokens`` and ``_maybe_compact`` *prefers that real number*, falling
-back to the estimate only on turn one. We were guessing; now the provider tells
-us. Everything from ch-07 is unchanged: skills, the managed window's door control
-(``clamp``), ``@path`` injection, tools behind the approval gate.
+The same primitive also gives the model *episodic* recall: ``search_memory_tool``
+(``harness/memory.py``) lets it keyword-search sessions that are not in the current
+context and pull matching facts back in. That tool rides the existing ``_run``
+loop — registering it needs no change to the loop itself.
+
+Everything from ch-08 is unchanged: the hardened sandbox, ``read_file`` scoped to
+the workspace, the verifier exercised by tools, usage-based compaction, skills,
+the managed window's door control, ``@path`` injection, and the approval gate.
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ from harness.compaction import compact, estimate_tokens
 from harness.context import deliver
 from harness.instructions import load_agents_md
 from harness.limits import clamp
+from harness.memory import DEFAULT_DIR, load_session, save_session
 from harness.skills import Skill, skills_prompt
 from harness.tools import ToolRegistry
 from model import Provider, chat
@@ -48,6 +50,8 @@ class Agent:
         approval_required: set[str] | None = None,
         context_limit: int = DEFAULT_CONTEXT_LIMIT,
         skills: list[Skill] | None = None,
+        session: str | None = None,
+        sessions_dir: str = DEFAULT_DIR,
     ) -> None:
         self.model = model
         self.provider = provider
@@ -59,7 +63,10 @@ class Agent:
         self.context_limit = context_limit
         self.skills = skills or []
         self._last_tokens = 0  # model-reported usage from the last call (ch-08)
-        self.messages: list[dict] = []
+        self.session = session
+        self.sessions_dir = sessions_dir
+        # Resume: load prior conversation from disk if this session exists (ch-09).
+        self.messages: list[dict] = load_session(session, sessions_dir) if session else []
         # Set true whenever the last turn triggered compaction — the REPL reads
         # this to surface that the window was managed (a demoable, visible event).
         self.just_compacted = False
@@ -67,6 +74,11 @@ class Agent:
     def _approved(self, name: str, args: str) -> bool:
         # Fail closed: a tool marked as requiring approval with no approver is denied.
         return self.approve(name, args) if self.approve else False
+
+    def _save(self) -> None:
+        # Durable state: persist the full history so a restart can resume it.
+        if self.session:
+            save_session(self.session, self.messages, self.sessions_dir)
 
     def _maybe_compact(self) -> None:
         # ch-08: prefer the model's reported usage; fall back to an estimate on turn one.
@@ -97,11 +109,13 @@ class Agent:
         return head + self.messages
 
     def send(self, user_text: str) -> str:
-        """Inject any @path files, append the turn, then drive the tool loop."""
+        """Inject any @path files, append the turn, drive the loop, then persist."""
         for block in deliver(user_text):  # @file references → injected context
             self.messages.append({"role": "user", "content": f"Context file:\n{block}"})
         self.messages.append({"role": "user", "content": user_text})
-        return self._run()
+        reply = self._run()
+        self._save()  # durable state: persist after every turn
+        return reply
 
     def _run(self) -> str:
         """Drive the model, executing tool calls until it produces a final answer."""
@@ -137,7 +151,9 @@ class Agent:
 
 
 def main() -> None:
+    from harness.memory import search_memory_tool
     from harness.sandbox import Sandbox, bash_tool
+    from harness.skills import load_skills
     from harness.tools import default_tools
     from harness.workspace import Workspace, edit_file_tool, write_file_tool
 
@@ -148,11 +164,10 @@ def main() -> None:
     tools.register(write_file_tool(workspace))
     tools.register(edit_file_tool(workspace))
     tools.register(bash_tool(Sandbox(), workdir=str(workspace.root)))
+    tools.register(search_memory_tool())  # episodic recall across past sessions
 
     def approve(name: str, args: str) -> bool:
         return input(f"  approve {name}({args})? [y/N] ").strip().lower() in ("y", "yes")
-
-    from harness.skills import load_skills
 
     parser = argparse.ArgumentParser(prog="agent")
     parser.add_argument(
@@ -171,10 +186,11 @@ def main() -> None:
         approval_required={"bash", "write_file", "edit_file"},
         context_limit=args.context_limit,
         skills=load_skills("skills"),
+        session="repl",
     )
     print(
-        "agent ready (ch-08) — sandboxed tools, approval gate, managed window, skills. "
-        "Ctrl-D to exit."
+        "agent ready (ch-09) — durable sessions, sandboxed tools, approval gate, "
+        "managed window, skills. Ctrl-D to exit."
     )
     while True:
         try:
