@@ -1,22 +1,23 @@
 """The agent — the harness drive loop. Grows one primitive per chapter.
 
-ch-03 — Instructions. ch-02 gave the agent memory of the *conversation*. But its
-behavior was set per turn: nothing told it how to act across turns. A system
-prompt fixes that — set the behavior once and the harness prepends it to every
-call. Persistent behavior without repeating yourself.
+ch-04 — Context delivery. The model can only see what's in the prompt; it can't
+open a file on its own. So when the user writes ``@notes.txt``, the *harness*
+reads that file and injects its contents as context before the real turn.
 
-The harness assembles two instruction layers into that prompt:
+``send`` now runs a pre-loop: ``deliver`` scans the user text for ``@path``
+references and returns a block per readable file; each block is appended as its
+own context message, and only then does the actual user turn go in. The model
+answers from contents the harness fetched for it.
 
-  - ``system``     — the built-in/base behavior (passed in, or DEFAULT_SYSTEM).
-  - ``AGENTS.md``  — per-project rules auto-loaded from the working directory.
-
-``_system_text`` joins the non-empty layers; ``_payload`` puts the result at the
-head of the history. The single ``chat`` call still goes through the ``model/``
-seam, so swapping providers never touches this file.
+The instruction layers from ch-03 are unchanged: ``_system_text`` joins the
+built-in ``system`` prompt and any auto-loaded ``AGENTS.md``; ``_payload`` puts
+that at the head of the history. The single ``chat`` call still goes through the
+``model/`` seam, so swapping providers never touches this file.
 """
 
 from __future__ import annotations
 
+from harness.context import deliver
 from harness.instructions import load_agents_md
 from model import Provider, chat
 
@@ -51,7 +52,9 @@ class Agent:
         return head + self.messages
 
     def send(self, user_text: str) -> str:
-        """Append the turn, replay history behind the system prompt, keep the reply."""
+        """Inject any @path files, append the turn, replay, keep the reply."""
+        for block in deliver(user_text):  # @file references → injected context
+            self.messages.append({"role": "user", "content": f"Context file:\n{block}"})
         self.messages.append({"role": "user", "content": user_text})
         resp = chat(self._payload(), model=self.model, provider=self.provider)
         self.messages.append({"role": "assistant", "content": resp.content})
@@ -60,7 +63,7 @@ class Agent:
 
 def main() -> None:
     agent = Agent(system=DEFAULT_SYSTEM)
-    print("agent ready (ch-03) — with a system prompt. Ctrl-D to exit.")
+    print("agent ready (ch-04) — reference files with @path. Ctrl-D to exit.")
     while True:
         try:
             user = input("you> ")

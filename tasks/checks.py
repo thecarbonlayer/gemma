@@ -148,3 +148,37 @@ def _demo_ch03() -> None:
 
 ACCEPTANCE["ch-03"] = _accept_ch03
 DEMOS["ch-03"] = _demo_ch03
+
+
+# ----------------------------------------------------------------------------
+# ch-04 — Context delivery (the harness reads @path files into the prompt)
+# ----------------------------------------------------------------------------
+def _accept_ch04() -> bool:
+    """The real agent answers from a file it was handed via @path."""
+    import tempfile
+    from pathlib import Path
+
+    from harness import agent
+
+    d = Path(tempfile.mkdtemp())
+    (d / "facts.txt").write_text("The launch code is GOGO-9.\n")
+    a = agent.Agent(system="Answer using the provided context files.")
+    reply = a.send(f"@{d / 'facts.txt'} What is the launch code? Reply with just the code.")
+    print("model replied:", repr(reply))
+    return "gogo-9" in reply.lower()
+
+
+def _demo_ch04() -> None:
+    import tempfile
+    from pathlib import Path
+
+    from harness import agent
+
+    d = Path(tempfile.mkdtemp())
+    (d / "facts.txt").write_text("Raveena is Karishma, and Karishma is Raveena.")
+    a = agent.Agent()
+    print("bot>", a.send(f"@{d / 'facts.txt'} Who is Raveena?"))
+
+
+ACCEPTANCE["ch-04"] = _accept_ch04
+DEMOS["ch-04"] = _demo_ch04
