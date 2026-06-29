@@ -625,3 +625,38 @@ def _demo_ch10() -> None:
 
 ACCEPTANCE["ch-10"] = _accept_ch10
 DEMOS["ch-10"] = _demo_ch10
+
+
+# ----------------------------------------------------------------------------
+# ch-11 — Subagents
+# ----------------------------------------------------------------------------
+def _accept_ch11() -> bool:
+    """Two independent subtasks fan out to isolated subagents; both come back right."""
+    from harness.subagents import fan_out
+
+    results = fan_out(
+        [
+            "Compute 6 * 7 using the calculator. Reply with just the number.",
+            "What is the capital of Japan? Reply with just the city.",
+        ]
+    )
+    print("results:", results)
+    joined = " ".join(results).lower()
+    return "42" in joined and "tokyo" in joined
+
+
+def _demo_ch11() -> None:
+    from harness.subagents import fan_out
+
+    results = fan_out(
+        [
+            "Compute 12 squared. Just the number.",
+            "Name a primary color. One word.",
+        ]
+    )
+    for r in results:
+        print("sub>", r)
+
+
+ACCEPTANCE["ch-11"] = _accept_ch11
+DEMOS["ch-11"] = _demo_ch11

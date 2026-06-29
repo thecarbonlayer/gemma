@@ -155,6 +155,7 @@ def main() -> None:
     from harness.orchestrator import Orchestrator
     from harness.sandbox import Sandbox, bash_tool
     from harness.skills import load_skills
+    from harness.subagents import delegate_tool, fan_out_tool
     from harness.tools import default_tools
     from harness.workspace import Workspace, edit_file_tool, write_file_tool
 
@@ -166,6 +167,8 @@ def main() -> None:
     tools.register(edit_file_tool(workspace))
     tools.register(bash_tool(Sandbox(), workdir=str(workspace.root)))
     tools.register(search_memory_tool())  # episodic recall across past sessions
+    tools.register(delegate_tool())  # hand a self-contained subtask to a fresh subagent
+    tools.register(fan_out_tool())  # split into independent subtasks, run them in parallel
 
     def approve(name: str, args: str) -> bool:
         return input(f"  approve {name}({args})? [y/N] ").strip().lower() in ("y", "yes")
@@ -190,8 +193,8 @@ def main() -> None:
         session="repl",
     )
     print(
-        "agent ready (ch-10) — plan multi-step tasks with /plan; durable sessions, "
-        "sandboxed tools, approval gate, managed window, skills. Ctrl-D to exit."
+        "agent ready (ch-11) — fan out to isolated subagents; plan with /plan; durable "
+        "sessions, sandboxed tools, approval gate, managed window, skills. Ctrl-D to exit."
     )
     orchestrator = Orchestrator()
     while True:
