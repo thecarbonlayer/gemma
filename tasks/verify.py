@@ -24,7 +24,7 @@ def main(argv: list[str] | None = None) -> int:
         failed.append("ruff-format")
     if _run(["ruff", "check", "."]) != 0:
         failed.append("ruff-check")
-    if _run(["mypy", "tasks"]) != 0:
+    if _run(["mypy", "model", "harness", "tasks"]) != 0:
         failed.append("mypy")
 
     rc = _run(["pytest"])
@@ -33,6 +33,8 @@ def main(argv: list[str] | None = None) -> int:
 
     print("\n$ smoke import", flush=True)
     try:
+        importlib.import_module("harness.agent")
+        importlib.import_module("model")
         importlib.import_module("tasks.checks")
         print("smoke import OK")
     except Exception as exc:  # noqa: BLE001
