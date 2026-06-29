@@ -384,3 +384,41 @@ def _demo_ch06() -> None:
 
 ACCEPTANCE["ch-06"] = _accept_ch06
 DEMOS["ch-06"] = _demo_ch06
+
+
+# ----------------------------------------------------------------------------
+# ch-07 — Skills
+# ----------------------------------------------------------------------------
+def _accept_ch07() -> bool:
+    """The model loads a skill file on demand and follows it.
+
+    The codeword Haila! exists only inside skills/sign-off/SKILL.md, so
+    producing it proves the model used read_file to load the skill
+    (progressive disclosure).
+    """
+    from harness import agent
+    from harness.skills import load_skills
+    from harness.tools import default_tools
+
+    a = agent.Agent(
+        system="Follow available skills when they apply.",
+        tools=default_tools(),
+        skills=load_skills("skills"),
+    )
+    reply = a.send("Use the sign-off skill. Say goodbye to the team.")
+    read_used = any(m.get("role") == "tool" for m in a.messages)
+    print("read a skill file:", read_used, "| reply:", repr(reply))
+    return "haila" in reply.lower() and read_used
+
+
+def _demo_ch07() -> None:
+    from harness import agent
+    from harness.skills import load_skills
+    from harness.tools import default_tools
+
+    a = agent.Agent(tools=default_tools(), skills=load_skills("skills"))
+    print("bot>", a.send("Use the sign-off skill and say goodbye."))
+
+
+ACCEPTANCE["ch-07"] = _accept_ch07
+DEMOS["ch-07"] = _demo_ch07

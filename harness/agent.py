@@ -1,19 +1,17 @@
 """The agent — the harness drive loop. Grows one primitive per chapter.
 
-ch-06 — Context management. Tool loops make the history grow without bound, and
-a finite window can't hold it all. The model didn't get worse — what's in front
-of it changed. So the harness manages the window with two cheap moves:
+ch-07 — Skills. A skill is a reusable procedure stored as a file: a directory
+with a ``SKILL.md`` (name + description + body). Only each skill's one-line
+description is advertised in the system prompt; the model loads the full body on
+demand with the read_file tool. That's progressive disclosure — the window holds
+a menu, not every recipe, and the agent pulls the one it needs when it needs it.
 
-* Compaction. Before each model call, if the history's estimated size exceeds
-  ``context_limit``, summarize the middle and keep the head + tail intact. The
-  conversation stays coherent past the limit instead of falling off the back.
-* Door control. Every item entering the prompt is clamped to a max size first —
-  ``@file`` blocks (in ``harness/context.py``) and tool results (here). One huge
-  output can't flood the window and crowd out everything that matters.
-
-Everything from ch-05 is unchanged: the system prompt + AGENTS.md head the
-payload, ``@path`` files are injected, tools run through ``_run`` behind the
-approval gate, and the single ``chat`` call still goes through the ``model/`` seam.
+The only change to the loop is in ``_system_text``: the instruction layer now
+joins three parts — the built-in system prompt, the project AGENTS.md, and the
+skills menu (``skills_prompt``). Everything from ch-06 is unchanged: the managed
+window (compaction + door control), ``@path`` file injection, tools through
+``_run`` behind the approval gate, and the single ``chat`` call through the
+``model/`` seam.
 """
 
 from __future__ import annotations
@@ -25,6 +23,7 @@ from harness.compaction import compact, estimate_tokens
 from harness.context import deliver
 from harness.instructions import load_agents_md
 from harness.limits import clamp
+from harness.skills import Skill, skills_prompt
 from harness.tools import ToolRegistry
 from model import Provider, chat
 
@@ -46,6 +45,7 @@ class Agent:
         approve: Callable[[str, str], bool] | None = None,
         approval_required: set[str] | None = None,
         context_limit: int = DEFAULT_CONTEXT_LIMIT,
+        skills: list[Skill] | None = None,
     ) -> None:
         self.model = model
         self.provider = provider
@@ -55,6 +55,7 @@ class Agent:
         self.approve = approve
         self.approval_required = approval_required or set()
         self.context_limit = context_limit
+        self.skills = skills or []
         self.messages: list[dict] = []
         # Set true whenever the last turn triggered compaction — the REPL reads
         # this to surface that the window was managed (a demoable, visible event).
@@ -72,8 +73,16 @@ class Agent:
             self.just_compacted = True
 
     def _system_text(self) -> str:
-        """The instruction layer = built-in system prompt + project AGENTS.md."""
-        parts = [p for p in (self.system, load_agents_md(self.agents_dir)) if p]
+        """Instruction layer = system prompt + project AGENTS.md + skills menu."""
+        parts = [
+            p
+            for p in (
+                self.system,
+                load_agents_md(self.agents_dir),
+                skills_prompt(self.skills),
+            )
+            if p
+        ]
         return "\n\n".join(parts)
 
     def _payload(self) -> list[dict]:
@@ -137,6 +146,8 @@ def main() -> None:
     def approve(name: str, args: str) -> bool:
         return input(f"  approve {name}({args})? [y/N] ").strip().lower() in ("y", "yes")
 
+    from harness.skills import load_skills
+
     parser = argparse.ArgumentParser(prog="agent")
     parser.add_argument(
         "--context-limit",
@@ -153,11 +164,9 @@ def main() -> None:
         approve=approve,
         approval_required={"bash", "write_file", "edit_file"},
         context_limit=args.context_limit,
+        skills=load_skills("skills"),
     )
-    print(
-        f"agent ready (ch-06) — tools + an approval gate + a managed window "
-        f"(context limit {agent.context_limit}). Ctrl-D to exit."
-    )
+    print("agent ready (ch-07) — tools, approval gate, managed window, skills. Ctrl-D to exit.")
     while True:
         try:
             user = input("you> ")
