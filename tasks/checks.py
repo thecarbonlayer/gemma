@@ -597,3 +597,31 @@ def _demo_ch09() -> None:
 
 ACCEPTANCE["ch-09"] = _accept_ch09
 DEMOS["ch-09"] = _demo_ch09
+
+
+# ----------------------------------------------------------------------------
+# ch-10 — Orchestration
+# ----------------------------------------------------------------------------
+def _accept_ch10() -> bool:
+    """The orchestrator plans a multi-step task and executes it to the right answer."""
+    from harness.orchestrator import Orchestrator
+
+    res = Orchestrator().run(
+        "Compute (12 + 8), then multiply that result by 3. Use the calculator tool."
+    )
+    print("plan:", res.plan)
+    print("final:", repr(res.final))
+    return len(res.plan) >= 1 and "60" in res.final
+
+
+def _demo_ch10() -> None:
+    from harness.orchestrator import Orchestrator
+
+    res = Orchestrator().run("Compute 15 * 4, then subtract 10. Use the calculator.")
+    for i, (step, out) in enumerate(zip(res.plan, res.results, strict=False)):
+        print(f"[{i}] {step}\n    -> {out}")
+    print("final:", res.final)
+
+
+ACCEPTANCE["ch-10"] = _accept_ch10
+DEMOS["ch-10"] = _demo_ch10

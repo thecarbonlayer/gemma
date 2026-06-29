@@ -152,6 +152,7 @@ class Agent:
 
 def main() -> None:
     from harness.memory import search_memory_tool
+    from harness.orchestrator import Orchestrator
     from harness.sandbox import Sandbox, bash_tool
     from harness.skills import load_skills
     from harness.tools import default_tools
@@ -189,9 +190,10 @@ def main() -> None:
         session="repl",
     )
     print(
-        "agent ready (ch-09) — durable sessions, sandboxed tools, approval gate, "
-        "managed window, skills. Ctrl-D to exit."
+        "agent ready (ch-10) — plan multi-step tasks with /plan; durable sessions, "
+        "sandboxed tools, approval gate, managed window, skills. Ctrl-D to exit."
     )
+    orchestrator = Orchestrator()
     while True:
         try:
             user = input("you> ")
@@ -199,6 +201,19 @@ def main() -> None:
             print()
             break
         if not user.strip():
+            continue
+        if user.startswith("/plan "):
+            task = user[len("/plan ") :].strip()
+            if not task:
+                print("usage: /plan <task>")
+                continue
+            result = orchestrator.run(task)
+            print("plan:")
+            for i, step in enumerate(result.plan, 1):
+                print(f"  {i}. {step}")
+            print("results:")
+            for i, (step, res) in enumerate(zip(result.plan, result.results, strict=False), 1):
+                print(f"  {i}. {step}\n     → {res}")
             continue
         reply = agent.send(user)
         if agent.just_compacted:
