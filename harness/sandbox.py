@@ -16,6 +16,7 @@ bash command can see a file a write tool just created (the workspace seam).
 
 from __future__ import annotations
 
+import os
 import subprocess
 import tempfile
 from dataclasses import dataclass
@@ -40,10 +41,15 @@ class Sandbox:
         image: str = "busybox",
         timeout: float = 15.0,
         prefer_docker: bool = True,
+        trusted: bool = False,
     ) -> None:
         self.image = image
         self.timeout = timeout
         self.prefer_docker = prefer_docker
+        # trusted: run in the REAL environment (uv/PATH/deps visible), unscrubbed.
+        # For a coding agent working on your own project running your own test
+        # command — the approval gate is the control, not network-none isolation.
+        self.trusted = trusted
         self._docker: bool | None = None
 
     def _docker_up(self) -> bool:
@@ -66,6 +72,8 @@ class Sandbox:
     def run(self, command: str, workdir: str | None = None) -> SandboxResult:
         # A workdir makes the sandbox operate on a persistent workspace (bind-mounted
         # in docker, cwd locally) instead of a throwaway dir.
+        if self.trusted:
+            return self._run_local(command, workdir)
         if self._docker_up():
             return self._run_docker(command, workdir)
         return self._run_local(command, workdir)
@@ -94,7 +102,9 @@ class Sandbox:
         # Fallback: scrubbed env + timeout. Uses the persistent workspace if given,
         # else a fresh throwaway dir. (network is NOT isolated here — that needs Docker.)
         cwd = workdir or tempfile.mkdtemp(prefix="sandbox-")
-        env = dict(_SCRUBBED_ENV, HOME=cwd, TMPDIR=cwd)
+        # trusted → the real environment (your test runner needs uv/PATH/deps);
+        # otherwise the scrubbed env (untrusted code sees no host secrets).
+        env = os.environ.copy() if self.trusted else dict(_SCRUBBED_ENV, HOME=cwd, TMPDIR=cwd)
         proc = subprocess.run(
             ["bash", "-c", command],
             cwd=cwd,
@@ -103,7 +113,9 @@ class Sandbox:
             text=True,
             timeout=self.timeout,
         )
-        return SandboxResult(proc.stdout, proc.stderr, proc.returncode, "local")
+        return SandboxResult(
+            proc.stdout, proc.stderr, proc.returncode, "trusted" if self.trusted else "local"
+        )
 
 
 def bash_tool(sandbox: Sandbox, workdir: str | None = None) -> Tool:

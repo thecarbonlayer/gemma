@@ -30,3 +30,11 @@ chapter is its own commit, tagged, building cumulatively on the last.
 - **Real models, no mocks.** Demos and accept checks run against a live endpoint configured via `.env`
   (`LLM_BASE_URL`, `LLM_MODEL`, `LLM_API_KEY`).
 - Run it: `uv run agent "..."` (REPL), `uv run tui` (Textual UI), `uv run demo ch-NN` (chapter demo).
+
+## Testing
+
+The harness reads this command and enforces a passing run whenever it changes code:
+
+```
+uv run verify
+```

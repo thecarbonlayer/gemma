@@ -15,7 +15,9 @@ the files survive across calls for ``bash`` (run in the same dir) to see.
 
 from __future__ import annotations
 
+import subprocess
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
 
 from harness.tools import Tool
@@ -83,3 +85,46 @@ def edit_file_tool(ws: Workspace) -> Tool:
         },
         func=ws.edit,
     )
+
+
+def git_worktree(base: str | Path = ".") -> tuple[Workspace, Callable[[], None]] | None:
+    """If ``base`` is inside a git repo, create an ephemeral detached worktree of
+    HEAD and return ``(Workspace(worktree), cleanup)``. The agent gets the *real*
+    codebase — tests run, deps resolve — but every edit lands in a throwaway
+    worktree, so your actual checkout is never touched. Returns ``None`` when we're
+    not in a git repo (the caller falls back to a scratch dir).
+
+    If the worktree is a uv project, its deps are synced once here (offline, from
+    cache) so the declared test command runs fast, not cold, mid-turn.
+    """
+    base = Path(base).resolve()
+    inside = subprocess.run(
+        ["git", "-C", str(base), "rev-parse", "--is-inside-work-tree"],
+        capture_output=True,
+        text=True,
+    )
+    if inside.returncode != 0 or inside.stdout.strip() != "true":
+        return None
+    root = subprocess.run(
+        ["git", "-C", str(base), "rev-parse", "--show-toplevel"],
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    wt = Path(tempfile.mkdtemp(prefix="agent-worktree-"))
+    add = subprocess.run(
+        ["git", "-C", root, "worktree", "add", "--detach", str(wt), "HEAD"],
+        capture_output=True,
+        text=True,
+    )
+    if add.returncode != 0:
+        return None
+    if (wt / "pyproject.toml").is_file():
+        subprocess.run(["uv", "sync"], cwd=wt, capture_output=True)
+
+    def cleanup() -> None:
+        subprocess.run(
+            ["git", "-C", root, "worktree", "remove", "--force", str(wt)],
+            capture_output=True,
+        )
+
+    return Workspace(root=wt), cleanup

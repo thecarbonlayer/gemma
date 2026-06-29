@@ -660,3 +660,89 @@ def _demo_ch11() -> None:
 
 ACCEPTANCE["ch-11"] = _accept_ch11
 DEMOS["ch-11"] = _demo_ch11
+
+
+# ----------------------------------------------------------------------------
+# ch-12 — Verification (the model runs the project's tests; the harness enforces)
+# ----------------------------------------------------------------------------
+# A seeded minimal project: an AGENTS.md that DECLARES the test command, plus a
+# test the model didn't write. The harness reads the command from AGENTS.md and,
+# after a code change, won't accept "done" without an observed passing run of it.
+# The command here is a deps-free python3 script so the accept is deterministic;
+# the on-camera demo points the same mechanism at a real repo (gemma: uv run verify).
+_CH12_AGENTS_MD = "# demo project\n\n## Testing\n```\npython3 test_is_prime.py\n```\n"
+_CH12_TEST = (
+    "from is_prime import is_prime\n\n"
+    "assert is_prime(7)\n"
+    "assert is_prime(2)\n"
+    "assert not is_prime(1)\n"
+    "assert not is_prime(8)\n"
+    "print('TEST_OK')\n"
+)
+_CH12_COMMAND = "python3 test_is_prime.py"
+
+
+def _build_ch12_agent():
+    from harness import agent
+    from harness.sandbox import Sandbox, bash_tool
+    from harness.tools import default_tools
+    from harness.workspace import Workspace, edit_file_tool, write_file_tool
+
+    ws = Workspace()
+    ws.write("AGENTS.md", _CH12_AGENTS_MD)  # declares the test command
+    ws.write("test_is_prime.py", _CH12_TEST)  # the external oracle, seeded by us
+    tools = default_tools()
+    tools.register(write_file_tool(ws))
+    tools.register(edit_file_tool(ws))
+    # trusted bash so the declared command runs in a real env (deps-free here)
+    tools.register(bash_tool(Sandbox(trusted=True, timeout=60), workdir=str(ws.root)))
+    a = agent.Agent(
+        system=agent.DEFAULT_SYSTEM, tools=tools, agents_dir=str(ws.root), verify_attempts=4
+    )
+    return a, ws
+
+
+def _accept_ch12() -> bool:
+    """The model writes is_prime.py; because it changed code, the harness reads the
+    declared command from AGENTS.md and won't accept 'done' without an observed
+    passing run of it. Proven two ways: (1) the transcript holds that passing run;
+    (2) independently re-running the seeded test now still passes."""
+    from harness.sandbox import Sandbox
+
+    a, ws = _build_ch12_agent()
+    a.send(
+        "Write is_prime.py in the workspace so the project's tests pass. "
+        "Run the tests to prove it before you report done."
+    )
+    observed = a._observed_pass(_CH12_COMMAND, 0)
+    final = Sandbox(trusted=True).run(_CH12_COMMAND, workdir=str(ws.root))
+    wrote = (ws.root / "is_prime.py").is_file()
+    print(
+        f"wrote is_prime.py: {wrote} | harness observed a passing run: {observed} "
+        f"| independent re-run exit: {final.exit_code}"
+    )
+    return wrote and observed and final.exit_code == 0
+
+
+def _demo_ch12() -> None:
+    """On camera the real version is interactive (dogfood: edit a harness file, watch
+    the agent run `uv run verify` and refuse to finish until green). This headless
+    version drives the same mechanism against the seeded project."""
+    a, ws = _build_ch12_agent()
+    a.send(
+        "Write is_prime.py so the project's tests pass. Run them with bash and show "
+        "the result before you say done."
+    )
+    receipts = [
+        m["content"]
+        for m in a.messages
+        if m.get("role") == "tool" and str(m["content"]).startswith("[exit")
+    ]
+    pushbacks = sum(1 for m in a.messages if "passing run of the" in str(m.get("content", "")))
+    print(f"the model ran the project's tests itself; {pushbacks} pushback(s) before a real pass")
+    print("last receipt:", receipts[-1] if receipts else "(none)")
+    print("harness accepted only after an observed [exit 0]:", a._observed_pass(_CH12_COMMAND, 0))
+
+
+ACCEPTANCE["ch-12"] = _accept_ch12
+DEMOS["ch-12"] = _demo_ch12
