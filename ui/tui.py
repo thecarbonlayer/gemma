@@ -40,14 +40,14 @@ from harness.observability import Tracer
 from harness.sandbox import Sandbox, bash_tool
 from harness.skills import load_skills
 from harness.subagents import delegate_tool, fan_out_tool
-from harness.tools import default_tools
+from harness.tools import default_tools, read_file_tool
 from harness.workspace import Workspace, edit_file_tool, write_file_tool
 from model import Provider
 from model.pricing import format_cost
 
 APPROVAL_TOOLS = {"bash", "write_file", "edit_file"}
 _STATUS_COLOR = {"denied": "yellow", "error": "red", "fail": "red", "pass": "green", "ok": ""}
-_KIND_ICON = {"llm": "◆", "tool": "›", "verify": "✓"}
+_KIND_ICON = {"llm": "◆", "tool": "›", "verify": "✓", "plan": "▷"}
 
 
 def _unified_diff(old: str, new: str, path: str) -> str:
@@ -75,15 +75,37 @@ def approval_preview(name: str, args_json: str, workspace: Workspace | None) -> 
         }
     if name in ("write_file", "edit_file"):
         path = args.get("path", "")
-        current = workspace.read(path) if workspace else ""
-        if current.startswith("error:"):
-            current = ""
+        raw = workspace.read(path) if workspace else "error: no such file"
+        missing = raw.startswith("error:")
+        current = "" if missing else raw
+        title = f"approval required · {name} · {path}"
         if name == "edit_file":
-            new = current.replace(args.get("old", ""), args.get("new", ""), 1) if current else ""
+            # Preview exactly what ws.edit will do — including its failure modes, so
+            # the modal never shows "(no change)" for an edit that will actually error.
+            old = args.get("old", "")
+            if missing:
+                return {
+                    "title": title,
+                    "kind": "other",
+                    "body": f"edit will fail: no such file: {path}",
+                }
+            if old == "":
+                return {
+                    "title": title,
+                    "kind": "other",
+                    "body": "edit will fail: `old` must be non-empty",
+                }
+            if old not in current:
+                return {
+                    "title": title,
+                    "kind": "other",
+                    "body": f"edit will fail: text to replace not found in {path}",
+                }
+            new = current.replace(old, args.get("new", ""), 1)
         else:
             new = args.get("content", "")
         return {
-            "title": f"approval required · {name} · {path}",
+            "title": title,
             "kind": "diff",
             "body": _unified_diff(current, new, path) or "(no change)",
         }
@@ -175,6 +197,8 @@ class AgentTUI(App):
     # --- agent construction -------------------------------------------------
     def _build_agent(self, session: str) -> agent_mod.Agent:
         tools = default_tools()
+        # read from the same tree we write to (the worktree), never the host cwd.
+        tools.register(read_file_tool(str(self.workspace.root)))
         tools.register(write_file_tool(self.workspace))
         tools.register(edit_file_tool(self.workspace))
         # trusted bash: the agent works on your real project (worktree), so your
@@ -182,7 +206,8 @@ class AgentTUI(App):
         tools.register(
             bash_tool(Sandbox(trusted=True, timeout=120), workdir=str(self.workspace.root))
         )
-        tools.register(search_memory_tool(self.sessions_dir))
+        # recall across *other* sessions — this one is already in context.
+        tools.register(search_memory_tool(self.sessions_dir, exclude=session))
         tools.register(delegate_tool(model=self.provider.model))
         tools.register(fan_out_tool(model=self.provider.model))
         tracer = Tracer(model=self.provider.model)
@@ -207,7 +232,7 @@ class AgentTUI(App):
             with Vertical(id="conversation", classes="pane"):
                 yield VerticalScroll(id="log", classes="pane-body")
                 yield Input(
-                    placeholder="type a message…   ·   /reset   /new",
+                    placeholder="type a message…   ·   /plan <task>   /reset   /new",
                     id="prompt",
                     classes="pane-foot",
                 )
@@ -351,8 +376,50 @@ class AgentTUI(App):
             self._reset_session()
         elif cmd == "/new":
             self._new_session()
+        elif cmd == "/plan":
+            task = text[len("/plan") :].strip()
+            if not task:
+                self._write_agent("usage: `/plan <task>`")
+                return
+            self._busy = True
+            self._write_user(text)
+            self._run_plan(task)
         else:
-            self._write_agent(f"unknown command `{cmd}` · try `/reset` or `/new`")
+            self._write_agent(f"unknown command `{cmd}` · try `/plan`, `/reset`, or `/new`")
+
+    @work(thread=True, exclusive=True)
+    def _run_plan(self, task: str) -> None:
+        """Run the ch-10 orchestrator off the UI thread: plan the task into steps and
+        execute them. The planner's ``plan`` span nests under its own turn in the
+        tracer, so it lands in the trace pane alongside the agent's turns."""
+        from harness.orchestrator import Orchestrator
+
+        error: str | None = None
+        result = None
+        try:
+            if self.agent.tracer is not None:
+                self.agent.tracer.turn_start()
+            orch = Orchestrator(model=self.provider.model, tracer=self.agent.tracer)
+            result = orch.run(task)
+        except Exception as exc:  # surface, don't crash the UI
+            error = str(exc)
+        self.call_from_thread(self._plan_done, result, error)
+
+    def _plan_done(self, result, error: str | None) -> None:
+        if error is not None:
+            self._write_agent(f"[plan error] {error}")
+        else:
+            lines = ["**plan**"]
+            lines += [f"{i}. {step}" for i, step in enumerate(result.plan, 1)]
+            lines += ["", "**results**"]
+            for i, (step, res) in enumerate(zip(result.plan, result.results, strict=False), 1):
+                lines.append(f"{i}. {step}")
+                lines.append(f"   → {res}")
+            self._write_agent("\n".join(lines))
+        self._rebuild_trace()
+        self._refresh_header()
+        self._busy = False
+        self.query_one("#prompt", Input).focus()
 
     def _open_session(self, session: str) -> None:
         """Point the UI at ``session`` (already on disk or brand-new) and re-render."""
