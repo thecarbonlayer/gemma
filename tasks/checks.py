@@ -830,3 +830,66 @@ def _demo_ch14() -> None:
 
 ACCEPTANCE["ch-14"] = _accept_ch14
 DEMOS["ch-14"] = _demo_ch14
+
+
+# ----------------------------------------------------------------------------
+# streaming + print mode (post-ch-14 feat)
+# ----------------------------------------------------------------------------
+def _accept_stream_deltas() -> bool:
+    """A real turn streams tokens to the callback as they arrive, and the streamed
+    content reconstructs the final reply (deltas are the answer, not a preview)."""
+    from harness import agent
+
+    pieces: list[tuple[str, str]] = []
+    a = agent.Agent(system="Answer in one short sentence.")  # no tools → a single call
+    reply = a.send(
+        "In one short sentence, say hello.", on_delta=lambda ch, t: pieces.append((ch, t))
+    )
+    streamed = "".join(t for ch, t in pieces if ch == "content")
+    print(f"deltas={len(pieces)} streamed={streamed!r} reply={reply!r}")
+    return bool(pieces) and bool(reply.strip()) and streamed == reply
+
+
+def _accept_print_json() -> bool:
+    """``run_once(..., fmt='json')`` returns a well-formed object: a non-empty reply
+    plus trace totals with at least one model call."""
+    import json
+    import tempfile
+
+    from harness.agent import run_once
+
+    with tempfile.TemporaryDirectory() as d:
+        out = run_once(
+            "In one short sentence, say hello.",
+            fmt="json",
+            session="accept",
+            sessions_dir=d,
+            workspace_root=d,
+            agents_dir=d,
+        )
+    obj = json.loads(out)
+    print("json:", out[:200])
+    totals = obj.get("totals", {})
+    return bool(obj.get("reply", "").strip()) and totals.get("llm_calls", 0) >= 1
+
+
+def _accept_streaming() -> bool:
+    """Streaming = live token deltas that reconstruct the reply, plus a machine-
+    readable print-mode JSON result."""
+    return _accept_stream_deltas() and _accept_print_json()
+
+
+def _demo_streaming() -> None:
+    from harness import agent
+
+    print("streaming: ", end="", flush=True)
+    a = agent.Agent(system="Answer in one short sentence.")
+    a.send(
+        "In one short sentence, say hello.",
+        on_delta=lambda ch, t: print(t, end="", flush=True) if ch == "content" else None,
+    )
+    print()
+
+
+ACCEPTANCE["streaming"] = _accept_streaming
+DEMOS["streaming"] = _demo_streaming

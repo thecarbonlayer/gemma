@@ -12,7 +12,7 @@ as a name (``from model import chat``) so tests can ``patch.object(mod, "chat")`
 from __future__ import annotations
 
 from model.openai_compatible import complete_openai
-from model.provider import LLMResponse, Provider
+from model.provider import LLMResponse, OnDelta, Provider
 
 
 def chat(
@@ -24,21 +24,32 @@ def chat(
     max_tokens: int = 1024,
     timeout: float = 180.0,
     provider: Provider | None = None,
+    on_delta: OnDelta | None = None,
 ) -> LLMResponse:
     """One call to the model, through a provider (defaults to env config).
 
     ``max_tokens`` is generous on purpose: Gemma is a reasoning model and spends
     tokens thinking (``reasoning_content``) before it produces visible content.
+
+    ``on_delta``, when given, streams tokens as they arrive. A ``responder``
+    provider (the fake) has no network to stream, so its final content is replayed
+    through the callback once — the streaming path stays exercised offline.
     """
     provider = provider or Provider.from_env()
     if provider.responder is not None:
-        return provider.responder(
+        resp = provider.responder(
             messages,
             model=model,
             tools=tools,
             temperature=temperature,
             max_tokens=max_tokens,
         )
+        if on_delta is not None:
+            if resp.reasoning:
+                on_delta("reasoning", resp.reasoning)
+            if resp.content:
+                on_delta("content", resp.content)
+        return resp
     return complete_openai(
         provider,
         messages,
@@ -47,4 +58,5 @@ def chat(
         temperature=temperature,
         max_tokens=max_tokens,
         timeout=timeout,
+        on_delta=on_delta,
     )

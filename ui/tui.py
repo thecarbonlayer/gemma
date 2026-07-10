@@ -166,6 +166,7 @@ class AgentTUI(App):
     .msg-user .msg-role { color: $text; }
     .msg-agent { background: $panel; }
     .msg-agent .msg-role { color: $accent; }
+    .msg-reason { color: $text-muted; }
     ApprovalModal { align: center middle; }
     #approval { width: 76; height: auto; max-height: 80%; border: thick $warning; padding: 1 2; }
     #approval-title { color: $warning; text-style: bold; }
@@ -192,6 +193,13 @@ class AgentTUI(App):
         self.workspace = workspace or Workspace()
         self.sessions_dir = sessions_dir
         self._busy = False
+        # Streaming state: the live agent block being filled this turn (None between
+        # turns). ``_stream_delta`` mounts it on the first token; ``_turn_done``
+        # finalizes it in place so the streamed block is never duplicated.
+        self._live_body: Static | None = None
+        self._live_reason: Static | None = None
+        self._live_content = ""
+        self._live_reason_text = ""
         self.agent = agent or self._build_agent(session)
 
     # --- agent construction -------------------------------------------------
@@ -286,6 +294,45 @@ class AgentTUI(App):
     def _write_agent(self, text: str) -> None:
         self._mount_block("agent ▸", Markdown(text), "msg-agent")
 
+    # --- streaming ----------------------------------------------------------
+    def _mount_live_block(self) -> None:
+        """Mount the empty agent block that this turn's tokens stream into: a dimmed
+        reasoning line above a Markdown body for the visible answer."""
+        self._live_reason = Static("", classes="msg-reason")
+        self._live_body = Static(Markdown(""), classes="msg-body")
+        block = Vertical(
+            Label("agent ▸", classes="msg-role"),
+            self._live_reason,
+            self._live_body,
+            classes="msg msg-agent",
+        )
+        log = self.query_one("#log", VerticalScroll)
+        log.mount(block)
+        log.scroll_end(animate=False)
+
+    def _stream_delta(self, channel: str, text: str) -> None:
+        """Append one streamed token to the live block (mounting it on first use).
+        Reasoning renders dimmed and is cleared once the visible answer begins."""
+        if self._live_body is None:
+            self._mount_live_block()
+        if channel == "reasoning":
+            self._live_reason_text += text
+            if self._live_reason is not None:
+                self._live_reason.update(Text(self._live_reason_text, style="dim"))
+        else:  # content — the visible answer
+            self._live_content += text
+            if self._live_reason is not None:
+                self._live_reason.update("")  # thinking done; hand the block to the answer
+            if self._live_body is not None:
+                self._live_body.update(Markdown(self._live_content))
+        self.query_one("#log", VerticalScroll).scroll_end(animate=False)
+
+    def _reset_live(self) -> None:
+        self._live_body = None
+        self._live_reason = None
+        self._live_content = ""
+        self._live_reason_text = ""
+
     def _write_diff(self, diff_text: str) -> None:
         self._mount_block("agent ▸", Syntax(diff_text, "diff", word_wrap=True), "msg-agent")
 
@@ -336,14 +383,26 @@ class AgentTUI(App):
 
     @work(thread=True, exclusive=True)
     def _run_turn(self, text: str) -> None:
+        def sink(channel: str, piece: str) -> None:
+            # The turn runs off the UI thread; bridge each token back to it.
+            self.call_from_thread(self._stream_delta, channel, piece)
+
         try:
-            reply = self.agent.send(text)
+            reply = self.agent.send(text, on_delta=sink)
         except Exception as exc:  # surface, don't crash the UI
             reply = f"[error] {exc}"
         self.call_from_thread(self._turn_done, reply)
 
     def _turn_done(self, reply: str) -> None:
-        self._write_agent(reply)
+        if self._live_body is not None:
+            # Finalize the streamed block with the canonical reply, in place — never
+            # mount a second block for what the user already watched stream in.
+            if self._live_reason is not None:
+                self._live_reason.update("")
+            self._live_body.update(Markdown(reply))
+            self._reset_live()
+        else:
+            self._write_agent(reply)  # nothing streamed → mount the reply now
         self._rebuild_trace()
         self._refresh_header()
         self._busy = False

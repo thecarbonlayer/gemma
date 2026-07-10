@@ -36,9 +36,20 @@ Defaults target a local LM Studio server; set `LLM_BASE_URL` / `LLM_MODEL` / `LL
 anything else.
 
 ```bash
-uv run agent "your prompt"   # the REPL (from ch-01 on)
-uv run tui                   # the Textual TUI (ch-14)
+uv run agent                 # the interactive REPL (replies stream token by token)
+uv run agent "your prompt"   # one-shot, non-interactive — runs a single turn, then exits
+uv run tui                   # the Textual TUI (ch-14) — tokens stream into a live block
 uv run demo ch-NN            # the demo for a chapter
+```
+
+Print mode (a one-shot with a prompt argument) takes `--format {plain,json,transcript}`:
+`plain` streams the answer to stdout, `json` emits a machine-readable object (reply +
+trace totals), `transcript` shows every message and tool step. It is fail-closed on the
+approval gate — bash/write/edit are denied unless you pass `-y/--yes`.
+
+```bash
+uv run agent "explain this repo" --format json      # scriptable / CI-friendly
+uv run agent "fix the failing test" --yes           # let it run the gated tools
 ```
 
 ## The chapters

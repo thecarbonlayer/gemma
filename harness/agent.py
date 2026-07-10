@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 import time
 from collections.abc import Callable
 
@@ -35,7 +36,7 @@ from harness.memory import DEFAULT_DIR, load_session, load_trace, save_session, 
 from harness.observability import Tracer
 from harness.skills import Skill, skills_prompt
 from harness.tools import ToolRegistry
-from model import Provider, chat
+from model import OnDelta, Provider, chat
 
 DEFAULT_SYSTEM = (
     "You are a concise, helpful coding assistant. Use tools when they help. "
@@ -45,6 +46,7 @@ DEFAULT_SYSTEM = (
 )
 MAX_TOOL_STEPS = 6
 DEFAULT_CONTEXT_LIMIT = 4000  # ~tokens; compact the history above this
+APPROVAL_TOOLS = {"bash", "write_file", "edit_file"}  # tools the gate guards
 CODE_EXTENSIONS = {
     ".py",
     ".js",
@@ -154,9 +156,12 @@ class Agent:
         head = [{"role": "system", "content": sys_text}] if sys_text else []
         return head + self.messages
 
-    def send(self, user_text: str) -> str:
+    def send(self, user_text: str, *, on_delta: OnDelta | None = None) -> str:
         """Inject @path files, run the loop, then — if this turn changed code —
-        enforce a real passing run of the project's tests before returning."""
+        enforce a real passing run of the project's tests before returning.
+
+        ``on_delta``, when given, streams this turn's tokens to the callback as the
+        model produces them; the returned reply is unchanged."""
         if self.tracer:
             self.tracer.turn_start()  # ch-13: nest this turn's steps under one span
         # Compact BEFORE this turn's messages are appended, so ``turn_start`` (an
@@ -168,8 +173,9 @@ class Agent:
             self.messages.append({"role": "user", "content": f"Context file:\n{block}"})
         self.messages.append({"role": "user", "content": user_text})
         turn_start = len(self.messages)
-        reply = self._run()
-        reply = self._enforce_run(reply, turn_start)  # gate "done" on a real test run
+        reply = self._run(on_delta)
+        # gate "done" on a real test run (re-prompt runs stream too)
+        reply = self._enforce_run(reply, turn_start, on_delta)
         self._save()  # durable state: persist after every turn
         return reply
 
@@ -191,7 +197,7 @@ class Agent:
                         return True
         return False
 
-    def _enforce_run(self, reply: str, turn_start: int) -> str:
+    def _enforce_run(self, reply: str, turn_start: int, on_delta: OnDelta | None = None) -> str:
         """If this turn changed code, refuse "done" until a real passing run of the
         project's declared test command (AGENTS.md ``## Testing``) is observed *after*
         the change. The model runs it with bash; the harness only watches the
@@ -216,7 +222,7 @@ class Agent:
                     ),
                 }
             )
-            reply = self._run()
+            reply = self._run(on_delta)
         # The last re-prompt's run hasn't been checked yet — check it, then fail closed.
         if self._record_pass(command, turn_start):
             return reply
@@ -290,7 +296,7 @@ class Agent:
             for m in self.messages[turn_start:]
         )
 
-    def _run(self) -> str:
+    def _run(self, on_delta: OnDelta | None = None) -> str:
         """Drive the model, executing tool calls until it produces a final answer.
 
         Compaction happens once per turn in ``send`` (before the turn is appended),
@@ -300,7 +306,9 @@ class Agent:
         for _ in range(MAX_TOOL_STEPS):
             t0 = time.perf_counter()
             payload = self._payload()
-            resp = chat(payload, model=self.model, tools=specs, provider=self.provider)
+            resp = chat(
+                payload, model=self.model, tools=specs, provider=self.provider, on_delta=on_delta
+            )
             self._last_tokens = int(resp.usage.get("total_tokens", 0)) or self._last_tokens
             if self.tracer:
                 self.tracer.record_llm(
@@ -343,14 +351,145 @@ class Agent:
         return "error: exceeded tool-step budget"
 
 
-def main() -> None:
+# --- non-interactive print mode ---------------------------------------------
+def _approver(yes: bool) -> Callable[[str, str], bool] | None:
+    """Approval policy for a non-interactive run. There's no TTY to prompt at, so
+    the default is fail-closed — return ``None`` and the agent's ``_approved``
+    denies every gated tool. ``--yes`` opts into auto-approve for scripting/CI."""
+    return (lambda name, args: True) if yes else None
+
+
+def _coding_tools(workspace, *, exclude_session: str | None) -> ToolRegistry:
+    """The mature agent's toolset, rooted at ``workspace`` — the same wiring the
+    REPL uses, factored out so one-shot mode builds an identical agent."""
     from harness.memory import search_memory_tool
-    from harness.orchestrator import Orchestrator
     from harness.sandbox import Sandbox, bash_tool
-    from harness.skills import load_skills
     from harness.subagents import delegate_tool, fan_out_tool
     from harness.tools import default_tools, read_file_tool
-    from harness.workspace import Workspace, edit_file_tool, git_worktree, write_file_tool
+    from harness.workspace import edit_file_tool, write_file_tool
+
+    tools = default_tools()
+    tools.register(read_file_tool(str(workspace.root)))
+    tools.register(write_file_tool(workspace))
+    tools.register(edit_file_tool(workspace))
+    tools.register(bash_tool(Sandbox(trusted=True, timeout=120), workdir=str(workspace.root)))
+    tools.register(search_memory_tool(exclude=exclude_session))
+    tools.register(delegate_tool())
+    tools.register(fan_out_tool())
+    return tools
+
+
+def run_once(
+    prompt: str,
+    *,
+    provider: Provider | None = None,
+    fmt: str = "plain",
+    yes: bool = False,
+    on_delta: OnDelta | None = None,
+    session: str | None = None,
+    sessions_dir: str = DEFAULT_DIR,
+    workspace_root: str = ".",
+    agents_dir: str | None = None,
+) -> str:
+    """Run exactly one turn non-interactively and return it rendered as ``fmt``
+    ("plain" | "json" | "transcript"). Fail-closed on approvals unless ``yes``.
+
+    Each invocation is stateless by default (``session=None``): nothing persists and
+    no history accumulates across calls — a one-shot is independent. Unlike the REPL
+    (which works in a throwaway git worktree), print mode operates on
+    ``workspace_root`` (the real project by default) — the deliberate one-shot
+    posture: it's your command, gated by approval unless you pass ``--yes``."""
+    from harness.render import render_json, render_plain, render_transcript
+    from harness.skills import load_skills
+    from harness.workspace import Workspace
+
+    provider = provider or Provider.from_env()
+    workspace = Workspace(root=workspace_root)
+    tracer = Tracer(model=provider.model)
+    agent = Agent(
+        system=DEFAULT_SYSTEM,
+        provider=provider,
+        model=provider.model,
+        tools=_coding_tools(workspace, exclude_session=session),
+        approve=_approver(yes),
+        approval_required=APPROVAL_TOOLS,
+        skills=load_skills("skills"),
+        session=session,
+        sessions_dir=sessions_dir,
+        agents_dir=agents_dir or str(workspace.root),
+        tracer=tracer,
+    )
+    reply = agent.send(prompt, on_delta=on_delta)
+    if fmt == "json":
+        return render_json(reply, tracer, agent.messages)
+    if fmt == "transcript":
+        return render_transcript(agent.messages, tracer)
+    return render_plain(reply)
+
+
+def _stdout_sink(channel: str, text: str) -> None:
+    """Stream tokens live: the visible answer to stdout, the model's thinking dimmed
+    to stderr (so a piped ``stdout`` stays clean — just the answer)."""
+    if channel == "reasoning":
+        sys.stderr.write(f"\033[2m{text}\033[0m")
+        sys.stderr.flush()
+    else:
+        sys.stdout.write(text)
+        sys.stdout.flush()
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(prog="agent")
+    parser.add_argument(
+        "prompt",
+        nargs="?",
+        help="run one turn non-interactively and print the result, then exit. "
+        "Omit it to open the interactive REPL.",
+    )
+    parser.add_argument(
+        "--format",
+        choices=("plain", "json", "transcript"),
+        default="plain",
+        help="print-mode output shape (default: %(default)s). plain streams the "
+        "answer; json/transcript emit once after the turn.",
+    )
+    parser.add_argument(
+        "-y",
+        "--yes",
+        action="store_true",
+        help="auto-approve gated tools (bash/write/edit) in print mode. Without it, "
+        "print mode is fail-closed and denies them (no TTY to prompt at).",
+    )
+    parser.add_argument(
+        "--context-limit",
+        type=int,
+        default=DEFAULT_CONTEXT_LIMIT,
+        help="token budget before the window is compacted (default: %(default)s). "
+        "Set it low, e.g. 400, to watch compaction fire live.",
+    )
+    args = parser.parse_args()
+
+    if args.prompt is not None:
+        _run_print_mode(args)
+        return
+    _run_repl(args)
+
+
+def _run_print_mode(args: argparse.Namespace) -> None:
+    """One-shot: run a single turn on the current project and emit it as ``--format``."""
+    provider = Provider.from_env()
+    if args.format == "plain":
+        # Stream the answer live to stdout; the returned render is what we streamed.
+        run_once(args.prompt, provider=provider, fmt="plain", yes=args.yes, on_delta=_stdout_sink)
+        print()  # terminate the streamed line
+    else:
+        print(run_once(args.prompt, provider=provider, fmt=args.format, yes=args.yes))
+
+
+def _run_repl(args: argparse.Namespace) -> None:
+    from harness.orchestrator import Orchestrator
+    from harness.skills import load_skills
+    from harness.workspace import Workspace, git_worktree
 
     # Work in a real project: a git worktree of this repo (your checkout stays
     # pristine — edits land in a throwaway worktree), or a scratch dir when we're
@@ -363,31 +502,10 @@ def main() -> None:
         workspace, cleanup = Workspace(), (lambda: None)
         print(f"not a git repo — working in a scratch dir — {workspace.root}")
 
-    tools = default_tools()
-    # Read from the same tree we write to (the worktree), not the host cwd — so the
-    # model sees its own edits, and can't read the cwd's .env (API key).
-    tools.register(read_file_tool(str(workspace.root)))
-    tools.register(write_file_tool(workspace))
-    tools.register(edit_file_tool(workspace))
-    # Trusted bash: your own project, your own test command — run for real, gated
-    # by approval, not by network-none isolation (that stays for untrusted code).
-    tools.register(bash_tool(Sandbox(trusted=True, timeout=120), workdir=str(workspace.root)))
-    tools.register(search_memory_tool(exclude="repl"))  # recall across *other* sessions
-    tools.register(delegate_tool())  # hand a self-contained subtask to a fresh subagent
-    tools.register(fan_out_tool())  # split into independent subtasks, run them in parallel
+    tools = _coding_tools(workspace, exclude_session="repl")
 
-    def approve(name: str, args: str) -> bool:
-        return input(f"  approve {name}({args})? [y/N] ").strip().lower() in ("y", "yes")
-
-    parser = argparse.ArgumentParser(prog="agent")
-    parser.add_argument(
-        "--context-limit",
-        type=int,
-        default=DEFAULT_CONTEXT_LIMIT,
-        help="token budget before the window is compacted (default: %(default)s). "
-        "Set it low, e.g. 400, to watch compaction fire live.",
-    )
-    args = parser.parse_args()
+    def approve(name: str, args_json: str) -> bool:
+        return input(f"  approve {name}({args_json})? [y/N] ").strip().lower() in ("y", "yes")
 
     # Resolve the provider once so the model id is known up front — the tracer needs
     # it to price calls (else the REPL trace shows $0.0000), and the agent reuses it.
@@ -399,7 +517,7 @@ def main() -> None:
         model=provider.model,
         tools=tools,
         approve=approve,
-        approval_required={"bash", "write_file", "edit_file"},
+        approval_required=APPROVAL_TOOLS,
         context_limit=args.context_limit,
         skills=load_skills("skills"),
         session="repl",
@@ -407,9 +525,9 @@ def main() -> None:
         tracer=tracer,
     )
     print(
-        "agent ready (ch-13) — observable runs (a trace with tokens + cost after each "
-        "turn); change code and the harness enforces the project's tests before 'done'; "
-        "/plan; durable sessions, approval gate, skills. Ctrl-D to exit."
+        "agent ready — streaming replies; observable runs (a trace with tokens + cost "
+        "after each turn); change code and the harness enforces the project's tests "
+        "before 'done'; /plan; durable sessions, approval gate, skills. Ctrl-D to exit."
     )
     orchestrator = Orchestrator()
     try:
@@ -434,10 +552,12 @@ def main() -> None:
                 for i, (step, res) in enumerate(zip(result.plan, result.results, strict=False), 1):
                     print(f"  {i}. {step}\n     → {res}")
                 continue
-            reply = agent.send(user)
+            print("bot> ", end="", flush=True)
+            reply = agent.send(user, on_delta=_stdout_sink)  # tokens stream live
+            print()  # end the streamed line
             if agent.just_compacted:
                 print("[context compacted — kept the start and end, summarized the middle]")
-            print("bot>", reply)
+            _ = reply  # already shown via the stream; keep the name for clarity
             print(tracer.timeline())
     finally:
         cleanup()

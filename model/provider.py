@@ -25,6 +25,11 @@ DEFAULT_BASE_URL = "http://localhost:1234/v1"
 DEFAULT_MODEL = "google/gemma-4-26b-a4b"
 DEFAULT_API_KEY = "lm-studio"
 
+# A streaming sink: called per token with ``(channel, text)`` where channel is
+# "content" (the visible answer) or "reasoning" (the model's thinking). Optional
+# everywhere — pass ``None`` and the seam is the same blocking call as before.
+OnDelta = Callable[[str, str], None]
+
 
 def _unquote(value: str) -> str:
     """Strip an inline ``# comment`` and matching surrounding quotes from a value.
