@@ -88,6 +88,29 @@ def test_bool_is_not_an_int(tmp_path):
         load_config(_write(tmp_path, raw))
 
 
+def test_non_positive_int_is_rejected(tmp_path):
+    raw = _valid_raw()
+    raw["max_tool_steps"] = 0
+    with pytest.raises(ValueError, match="positive"):
+        load_config(_write(tmp_path, raw))
+
+
+def test_non_compiling_attach_pattern_is_rejected(tmp_path):
+    raw = _valid_raw()
+    raw["attach_pattern"] = "@(unclosed"
+    with pytest.raises(ValueError, match="attach_pattern"):
+        load_config(_write(tmp_path, raw))
+
+
+def test_groupless_attach_pattern_is_rejected(tmp_path):
+    # The use site extracts the path via group(1); a pattern with no capture
+    # group compiles fine but would break every @path delivery.
+    raw = _valid_raw()
+    raw["attach_pattern"] = "@\\S+"
+    with pytest.raises(ValueError, match="attach_pattern"):
+        load_config(_write(tmp_path, raw))
+
+
 def test_non_string_in_set_field_is_rejected(tmp_path):
     raw = _valid_raw()
     raw["approval_tools"] = ["bash", 3]

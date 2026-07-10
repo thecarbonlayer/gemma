@@ -435,7 +435,8 @@ def main() -> None:
         "-y",
         "--yes",
         action="store_true",
-        help="auto-approve gated tools (bash/write/edit) in print mode. Without it, "
+        help="auto-approve the gated tools "
+        f"({'/'.join(sorted(CONFIG.approval_tools))}) in print mode. Without it, "
         "print mode is fail-closed and denies them (no TTY to prompt at).",
     )
     parser.add_argument(
