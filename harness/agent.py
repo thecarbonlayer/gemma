@@ -225,13 +225,18 @@ class Agent:
                 continue
             for tc in m.get("tool_calls") or []:
                 fn = tc.get("function", {})
+                name = fn.get("name", "")
                 res = results.get(tc.get("id", ""), "")
+                # Seed the call's bag from the tool's static attributes (a fresh
+                # copy, so a consumer mutating one call never touches the tool).
+                tool = self.tools.get(name) if self.tools else None
                 calls.append(
                     ToolCall(
-                        name=fn.get("name", ""),
+                        name=name,
                         args=fn.get("arguments", ""),
                         result=res,
                         is_error=res.startswith("error"),
+                        attributes=dict(tool.attributes) if tool else {},
                     )
                 )
         return calls
@@ -419,8 +424,13 @@ class Agent:
                             "is_error": status == "error",
                         }
                     )
+                    # Truncate at the tool's own budget if it declares one, else the
+                    # global door clamp (CONFIG.max_item_chars).
+                    tool = self.tools.get(name)
+                    budget = tool.max_result_chars if tool and tool.max_result_chars else None
+                    content = clamp(result, budget) if budget else clamp(result)
                     self.messages.append(
-                        {"role": "tool", "tool_call_id": tc.get("id", ""), "content": clamp(result)}
+                        {"role": "tool", "tool_call_id": tc.get("id", ""), "content": content}
                     )
                 continue
             self.messages.append({"role": "assistant", "content": resp.content})

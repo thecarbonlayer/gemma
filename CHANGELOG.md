@@ -14,6 +14,16 @@ One entry per release; commits stay fine-grained under a `feat(surface)` or
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-07-17
+
+Lets a consumer's tool declarations carry through to the run result, so more of
+its hand-built trace and truncation scaffolding can go. Both additive.
+
+### Added
+
+- `Tool.attributes`: static, consumer-defined metadata (a tier, a category) that gemma seeds into every `ToolCall.attributes` bag. gemma never reads it; the values are the consumer's.
+- `Tool.max_result_chars`: a per-tool result budget. A chatty tool truncates at its own size instead of the global door clamp.
+
 ## [0.1.0] - 2026-07-16
 
 Opens the embedding seam: the surface external code uses to build domain-specific
