@@ -18,7 +18,7 @@ import ast
 import json
 import operator
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 _BINOPS = {
@@ -90,6 +90,25 @@ class ToolRegistry:
 
     def register(self, tool: Tool) -> None:
         self._tools[tool.name] = tool
+
+    def get(self, name: str) -> Tool | None:
+        """The registered tool by name, or ``None`` — a supported lookup so a
+        consumer never has to reach into the private ``_tools`` dict."""
+        return self._tools.get(name)
+
+    def names(self) -> list[str]:
+        """The registered tool names, in registration order."""
+        return list(self._tools)
+
+    def wrap(self, name: str, wrapper: Callable[[Callable[..., str]], Callable[..., str]]) -> None:
+        """Replace tool ``name`` in place with ``wrapper(original_func)``, keeping
+        its description and schema. The generic mechanism behind fault injection,
+        logging, caching, and permission middleware — what the wrapper does is the
+        consumer's (dev-notes/adr/0002). Raises ``KeyError`` if the tool is absent."""
+        tool = self._tools.get(name)
+        if tool is None:
+            raise KeyError(f"no tool {name!r} to wrap")
+        self._tools[name] = replace(tool, func=wrapper(tool.func))
 
     def specs(self) -> list[dict]:
         return [

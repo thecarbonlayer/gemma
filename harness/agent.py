@@ -35,6 +35,8 @@ from harness.instructions import load_agents_md, test_command
 from harness.limits import clamp
 from harness.memory import DEFAULT_DIR, load_session, load_trace, save_session, save_trace
 from harness.observability import Tracer
+from harness.policy import Policy
+from harness.result import RunResult, ToolCall
 from harness.skills import Skill, skills_prompt
 from harness.tools import ToolRegistry
 from model import OnDelta, Provider, chat
@@ -68,6 +70,10 @@ class Agent:
         verify_attempts: int = CONFIG.verify_attempts,
         require_run: bool = CONFIG.require_run,
         tracer: Tracer | None = None,
+        temperature: float = 0.0,
+        max_tokens: int = 1024,
+        response_format: dict | None = None,
+        policy: Policy | None = None,
     ) -> None:
         self.model = model
         self.provider = provider
@@ -76,6 +82,20 @@ class Agent:
         self.tools = tools
         self.approve = approve
         self.approval_required = approval_required or set()
+        # v0.1: the gate is a Policy object. When none is passed, build one from the
+        # ch-05 approve/approval_required pair so every existing caller is unchanged.
+        self.policy = policy or Policy(
+            require_approval=frozenset(self.approval_required), approve=approve
+        )
+        self.temperature = temperature
+        self.max_tokens = max_tokens
+        self.response_format = response_format
+        # v0.1: an event stream a driver can observe mid-run (subscribe()).
+        self._subscribers: list[Callable[[dict], None]] = []
+        # per-turn counters, reset at the top of run()
+        self._turn_model_calls = 0
+        self._turn_approvals = 0
+        self._stop_reason = "stop"
         self.context_limit = context_limit
         self.skills = skills or []
         self._last_tokens = 0  # model-reported usage from the last call (ch-08)
@@ -98,6 +118,17 @@ class Agent:
     def _approved(self, name: str, args: str) -> bool:
         # Fail closed: a tool marked as requiring approval with no approver is denied.
         return self.approve(name, args) if self.approve else False
+
+    def subscribe(self, callback: Callable[[dict], None]) -> None:
+        """Observe this agent's events as they happen — ``turn_start``, each
+        ``tool_call`` (name, args, result, is_error), and ``turn_end`` (carrying the
+        RunResult). Each event is a plain dict, so a driver reads or reacts mid-run
+        without importing gemma's internals (the embedding seam, adr/0002)."""
+        self._subscribers.append(callback)
+
+    def _emit(self, event: dict) -> None:
+        for cb in self._subscribers:
+            cb(event)
 
     def _save(self) -> None:
         # Durable state: persist the full history so a restart can resume it.
@@ -134,12 +165,19 @@ class Agent:
         head = [{"role": "system", "content": sys_text}] if sys_text else []
         return head + self.messages
 
-    def send(self, user_text: str, *, on_delta: OnDelta | None = None) -> str:
-        """Inject @path files, run the loop, then — if this turn changed code —
-        enforce a real passing run of the project's tests before returning.
+    def run(self, user_text: str, *, on_delta: OnDelta | None = None) -> RunResult:
+        """Run one turn and return its structured outcome (v0.1, the embedding seam).
 
-        ``on_delta``, when given, streams this turn's tokens to the callback as the
-        model produces them; the returned reply is unchanged."""
+        Inject @path files, drive the loop, then — if this turn changed code —
+        enforce a real passing run of the project's tests before returning. The
+        result carries the final text plus what happened: the tool calls, the model
+        calls (``turns``), the gated calls that ran (``approvals``), the stop reason,
+        and the tracer totals. ``send`` is the string-returning shim over this.
+
+        ``on_delta``, when given, streams this turn's tokens to the callback."""
+        self._turn_model_calls = 0
+        self._turn_approvals = 0
+        self._stop_reason = "stop"
         if self.tracer:
             self.tracer.turn_start()  # ch-13: nest this turn's steps under one span
         # Compact BEFORE this turn's messages are appended, so ``turn_start`` (an
@@ -151,11 +189,52 @@ class Agent:
             self.messages.append({"role": "user", "content": f"Context file:\n{block}"})
         self.messages.append({"role": "user", "content": user_text})
         turn_start = len(self.messages)
+        self._emit({"type": "turn_start"})
         reply = self._run(on_delta)
         # gate "done" on a real test run (re-prompt runs stream too)
         reply = self._enforce_run(reply, turn_start, on_delta)
         self._save()  # durable state: persist after every turn
-        return reply
+        result = RunResult(
+            text=reply,
+            tool_calls=self._collect_tool_calls(turn_start),
+            turns=self._turn_model_calls,
+            approvals=self._turn_approvals,
+            stop_reason=self._stop_reason,
+            totals=self.tracer.totals() if self.tracer else {},
+        )
+        self._emit({"type": "turn_end", "result": result})
+        return result
+
+    def send(self, user_text: str, *, on_delta: OnDelta | None = None) -> str:
+        """Run one turn and return the final text — the ch-02..ch-14 contract,
+        now a thin shim over ``run`` so every existing caller is unchanged."""
+        return self.run(user_text, on_delta=on_delta).text
+
+    def _collect_tool_calls(self, turn_start: int) -> list[ToolCall]:
+        """Reconstruct this turn's tool calls from the transcript, pairing each
+        assistant tool_call with its recorded tool result by id. gemma reports what
+        ran; the ``attributes`` bag is left empty for a consumer to fill."""
+        results: dict[str, str] = {
+            m.get("tool_call_id", ""): str(m.get("content", ""))
+            for m in self.messages[turn_start:]
+            if m.get("role") == "tool"
+        }
+        calls: list[ToolCall] = []
+        for m in self.messages[turn_start:]:
+            if m.get("role") != "assistant":
+                continue
+            for tc in m.get("tool_calls") or []:
+                fn = tc.get("function", {})
+                res = results.get(tc.get("id", ""), "")
+                calls.append(
+                    ToolCall(
+                        name=fn.get("name", ""),
+                        args=fn.get("arguments", ""),
+                        result=res,
+                        is_error=res.startswith("error"),
+                    )
+                )
+        return calls
 
     def _changed_code(self, turn_start: int) -> bool:
         """Did this turn write or edit a source file? The trigger for the gate — a
@@ -285,8 +364,16 @@ class Agent:
             t0 = time.perf_counter()
             payload = self._payload()
             resp = chat(
-                payload, model=self.model, tools=specs, provider=self.provider, on_delta=on_delta
+                payload,
+                model=self.model,
+                tools=specs,
+                temperature=self.temperature,
+                max_tokens=self.max_tokens,
+                response_format=self.response_format,
+                provider=self.provider,
+                on_delta=on_delta,
             )
+            self._turn_model_calls += 1
             self._last_tokens = int(resp.usage.get("total_tokens", 0)) or self._last_tokens
             if self.tracer:
                 self.tracer.record_llm(
@@ -310,22 +397,35 @@ class Agent:
                     name = fn.get("name", "")
                     args = fn.get("arguments", "")
                     t1 = time.perf_counter()
-                    if name in self.approval_required and not self._approved(name, args):
-                        result = "[denied by approval gate]"
+                    allowed, marker = self.policy.decision(name, args)
+                    if not allowed:
+                        result = marker
                         status = "denied"
                     else:
+                        if name in self.policy.require_approval:
+                            self._turn_approvals += 1
                         result = self.tools.call(name, args)
                         status = "error" if result.startswith("error") else "ok"
                     if self.tracer:
                         self.tracer.record_tool(
                             name, time.perf_counter() - t1, args=args, result=result, status=status
                         )
+                    self._emit(
+                        {
+                            "type": "tool_call",
+                            "name": name,
+                            "args": args,
+                            "result": result,
+                            "is_error": status == "error",
+                        }
+                    )
                     self.messages.append(
                         {"role": "tool", "tool_call_id": tc.get("id", ""), "content": clamp(result)}
                     )
                 continue
             self.messages.append({"role": "assistant", "content": resp.content})
             return resp.content
+        self._stop_reason = "tool_budget"
         return "error: exceeded tool-step budget"
 
 

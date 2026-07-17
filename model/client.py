@@ -25,6 +25,7 @@ def chat(
     timeout: float = 180.0,
     provider: Provider | None = None,
     on_delta: OnDelta | None = None,
+    response_format: dict | None = None,
 ) -> LLMResponse:
     """One call to the model, through a provider (defaults to env config).
 
@@ -34,6 +35,11 @@ def chat(
     ``on_delta``, when given, streams tokens as they arrive. A ``responder``
     provider (the fake) has no network to stream, so its final content is replayed
     through the callback once — the streaming path stays exercised offline.
+
+    ``response_format``, when given, is forwarded to the endpoint verbatim (e.g.
+    ``{"type": "json_schema", "json_schema": {...}}`` or ``{"type": "json_object"}``)
+    so a caller can constrain the model to structured output. gemma forwards it and
+    parses nothing; the schema is the caller's (the embedding seam, adr/0002).
     """
     provider = provider or Provider.from_env()
     if provider.responder is not None:
@@ -43,6 +49,7 @@ def chat(
             tools=tools,
             temperature=temperature,
             max_tokens=max_tokens,
+            response_format=response_format,
         )
         if on_delta is not None:
             if resp.reasoning:
@@ -59,4 +66,5 @@ def chat(
         max_tokens=max_tokens,
         timeout=timeout,
         on_delta=on_delta,
+        response_format=response_format,
     )
