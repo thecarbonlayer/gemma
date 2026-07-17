@@ -130,6 +130,28 @@ def _check_field(key: str, value: object, expected: type) -> None:
             )
 
 
+def config_schema() -> list[dict]:
+    """Describe the editable surface: one entry per field with its type and bounds.
+
+    Derived from the same tables ``load_config`` validates against, so it cannot
+    drift from the door. An external editor reads this to know which knobs exist,
+    their types, which are collections, and which must stay positive — instead of
+    hardcoding that knowledge (the mechanism gemma owns; which knob to turn stays
+    the editor's, see dev-notes/adr/0002).
+    """
+    out: list[dict] = []
+    for name, typ in _SCHEMA.items():
+        out.append(
+            {
+                "name": name,
+                "type": "list[str]" if typ is list else typ.__name__,
+                "collection": name in _SET_FIELDS,
+                "positive_int": name in _POSITIVE_INT_FIELDS,
+            }
+        )
+    return out
+
+
 def load_config(path: str | Path = CONFIG_PATH) -> HarnessConfig:
     """Read and structurally validate the editable surface; fail loudly.
 

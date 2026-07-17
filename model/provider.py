@@ -49,9 +49,15 @@ def _unquote(value: str) -> str:
     return value
 
 
-def _load_dotenv() -> None:
-    """Minimal .env loader (no dependency). Real env vars always win."""
-    path = Path(".env")
+def load_env(root: str | Path = ".") -> None:
+    """Minimal .env loader (no dependency). Real env vars always win.
+
+    ``root`` is the directory holding ``.env``. It defaults to the process cwd, but
+    a consumer running from elsewhere (an eval suite, a tuner) passes the gemma
+    checkout root so it reads the same file the harness's own gates read, instead
+    of reimplementing dotenv (the embedding seam, see dev-notes/adr/0002).
+    """
+    path = Path(root) / ".env"
     if not path.exists():
         return
     for line in path.read_text().splitlines():
@@ -62,6 +68,10 @@ def _load_dotenv() -> None:
             line = line[len("export ") :].lstrip()
         key, _, value = line.partition("=")
         os.environ.setdefault(key.strip(), _unquote(value))
+
+
+# Back-compat alias for the pre-v0.1 private name.
+_load_dotenv = load_env
 
 
 @dataclass
@@ -92,8 +102,8 @@ class Provider:
     responder: Callable[..., LLMResponse] | None = None
 
     @classmethod
-    def from_env(cls) -> Provider:
-        _load_dotenv()
+    def from_env(cls, root: str | Path = ".") -> Provider:
+        load_env(root)
         return cls(
             base_url=os.environ.get("LLM_BASE_URL", DEFAULT_BASE_URL),
             model=os.environ.get("LLM_MODEL", DEFAULT_MODEL),

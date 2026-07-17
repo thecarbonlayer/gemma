@@ -14,9 +14,12 @@ One entry per release; commits stay fine-grained under a `feat(surface)` or
 
 ## [Unreleased]
 
-The first release, `v0.1.0`, opens the embedding seam: the surface external code
-uses to build domain-specific agents on the harness. Planned contents, tracked
-in [dev-notes/sdk-seam-roadmap.md](dev-notes/sdk-seam-roadmap.md):
+## [0.1.0] - 2026-07-16
+
+Opens the embedding seam: the surface external code uses to build domain-specific
+agents on the harness. Backlog and rationale in
+[dev-notes/sdk-seam-roadmap.md](dev-notes/sdk-seam-roadmap.md). Every item is a
+generic mechanism; domain and policy stay in the consumer (adr/0002).
 
 ### Added
 

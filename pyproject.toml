@@ -20,7 +20,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["model", "harness", "ui", "tasks"]
+packages = ["model", "harness", "ui", "tasks", "gemma"]
 
 [tool.ruff]
 line-length = 100
