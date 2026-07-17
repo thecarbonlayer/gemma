@@ -18,7 +18,7 @@ import ast
 import json
 import operator
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 _BINOPS = {
@@ -82,6 +82,13 @@ class Tool:
     description: str
     parameters: dict
     func: Callable[..., str]
+    # v0.2: static, consumer-defined metadata seeded into every ToolCall's
+    # ``attributes`` bag (e.g. a tier, a category). gemma never reads it — the
+    # values and their meaning are the consumer's (dev-notes/adr/0002).
+    attributes: dict = field(default_factory=dict)
+    # v0.2: this tool's own result budget. ``None`` uses the global door clamp
+    # (CONFIG.max_item_chars); set it to truncate a chatty tool at its own size.
+    max_result_chars: int | None = None
 
 
 class ToolRegistry:

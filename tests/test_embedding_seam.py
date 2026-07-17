@@ -17,8 +17,16 @@ from harness.harness_config import CONFIG, config_schema
 from harness.policy import Policy
 from harness.provenance import provenance
 from harness.result import RunResult
-from harness.tools import default_tools
+from harness.tools import Tool, ToolRegistry, default_tools
 from model import LLMResponse, Provider, chat, fake
+
+_EMPTY_PARAMS = {"type": "object", "properties": {}}
+
+
+def _tool_call(name: str, args: str = "{}") -> LLMResponse:
+    return LLMResponse(
+        content="", tool_calls=[{"id": "1", "function": {"name": name, "arguments": args}}]
+    )
 
 
 def _scripted(responses: list[LLMResponse]) -> Provider:
@@ -80,6 +88,47 @@ def test_tool_budget_stop_reason():
     p = Provider(base_url="fake://x", model="fake", api_key="x", responder=always_tool)
     r = Agent(provider=p, tools=default_tools()).run("loop forever")
     assert r.stop_reason == "tool_budget"
+
+
+# --- v0.2 tool metadata + per-tool truncation --------------------------------
+def test_tool_attributes_seed_into_each_call():
+    reg = ToolRegistry()
+    reg.register(
+        Tool(
+            name="ping",
+            description="",
+            parameters=_EMPTY_PARAMS,
+            func=lambda: "pong",
+            attributes={"tier": "domain"},
+        )
+    )
+    p = _scripted([_tool_call("ping"), LLMResponse(content="done", finish_reason="stop")])
+
+    r = Agent(provider=p, tools=reg).run("go")
+
+    assert r.tool_calls[0].attributes == {"tier": "domain"}
+    # a fresh copy: mutating one call's bag must not touch the tool's static data
+    r.tool_calls[0].attributes["extra"] = 1
+    assert reg.get("ping").attributes == {"tier": "domain"}
+
+
+def test_per_tool_truncation_budget():
+    reg = ToolRegistry()
+    reg.register(
+        Tool(
+            name="big",
+            description="",
+            parameters=_EMPTY_PARAMS,
+            func=lambda: "X" * 500,
+            max_result_chars=10,
+        )
+    )
+    p = _scripted([_tool_call("big"), LLMResponse(content="done", finish_reason="stop")])
+
+    r = Agent(provider=p, tools=reg).run("go")
+
+    res = r.tool_calls[0].result
+    assert res.startswith("X" * 10) and "truncated" in res and len(res) < 100
 
 
 # --- T1.3 permission policy ---------------------------------------------------
@@ -191,7 +240,7 @@ def test_response_format_reaches_the_http_payload(monkeypatch):
 def test_gemma_facade_exports_the_surface():
     import gemma
 
-    assert gemma.__version__ == "0.1.0"
+    assert gemma.__version__ == "0.2.0"
     for name in (
         "Agent",
         "RunResult",
